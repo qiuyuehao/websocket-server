@@ -335,8 +335,8 @@ void clientWorker(ClientTaskInfo* pinfo){
     int outmsglen = 0;
     int inmsglen = 0;
     
-    memset(pinmsgbuf, 0x00, sizeof(BUF_LEN));
-    memset(poutmsg, 0x00, sizeof(BUF_LEN));
+    memset(pinmsgbuf, 0x00, BUF_LEN);
+    memset(poutmsg, 0x00, BUF_LEN);
 
     while(1){
         
@@ -351,7 +351,7 @@ void clientWorker(ClientTaskInfo* pinfo){
             close(clientSocket);
             fprintf(stdout, "[clientWorker]readed <= 0\n");
             perror("recv failed\n");
-            return;
+            break;
         }
         #ifdef PACKET_DUMP
         printf("in packet:%d\n", (int)readed);
@@ -400,7 +400,7 @@ void clientWorker(ClientTaskInfo* pinfo){
                     break;
                 }                
             }
-            memset(poutmsg, 0x00, sizeof(BUF_LEN)); outmsglen = 0;
+            memset(poutmsg, 0x00, BUF_LEN); outmsglen = 0;
             if(ret == -1){
                 break;
             }
