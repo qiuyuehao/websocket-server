@@ -39,13 +39,14 @@
 
 //#define PORT 8088
 #define BUF_LEN 0xFFFF
-#define PACKET_DUMP
+//#define PACKET_DUMP
 #define TASK_FLAG_RUNNING 1
 #define TASK_FLAG_IDLE 0
 
 typedef struct{
     char* pauthscript;
     char* pcgiscript;
+    char* pfifoname;
     int listenport;
 }RunOption;
 
@@ -114,41 +115,46 @@ void runClientThread(int fd){
     memset(pclitask, 0x00, sizeof(ClientTaskInfo));
     pclitask->sockfd = fd;
     pclitask->runflag = 1;
-	pclitask->state = WS_STATE_OPENING;
-	pthread_mutex_init(&(pclitask->sendMsgMutex),NULL);
+    pclitask->state = WS_STATE_OPENING;
+    pthread_mutex_init(&(pclitask->sendMsgMutex),NULL);
     pthread_create(&pclitask->pt, NULL, taskThreadFunc, pclitask);
     list_node_t *pnewnode = list_node_new(pclitask);
-	pthread_mutex_lock(&taskListMutex);
+    pthread_mutex_lock(&taskListMutex);
     list_rpush(ptasklist, pnewnode);
-	pthread_mutex_unlock(&taskListMutex);
+    pthread_mutex_unlock(&taskListMutex);
 }
 
 void checkDeadThread(){
-	LOG("checkDeadThread")
-	ClientTaskInfo* ptask = NULL;
-    list_node_t *node;	
-	pthread_mutex_lock(&taskListMutex);
-    list_iterator_t *it = list_iterator_new(ptasklist, LIST_HEAD);
-    while ((node = list_iterator_next(it))) {
-        ptask = (ClientTaskInfo*)(node->val);
-        if(ptask->runflag == TASK_FLAG_IDLE){
-            LOG("checkDeadThread:remove one Dead thread")
-            list_remove(ptasklist, node);
-            FREE_MEM(ptask->prunurl)
-	        pthread_mutex_destroy(&ptask->sendMsgMutex);
-            free(ptask);
+    LOG("checkDeadThread")
+    ClientTaskInfo* ptask = NULL;
+    list_node_t *node;    
+    pthread_mutex_lock(&taskListMutex);
+    int found = 0;
+    do{
+        found = 0;
+        list_iterator_t *it = list_iterator_new(ptasklist, LIST_HEAD);
+        while ((node = list_iterator_next(it))) {
+            ptask = (ClientTaskInfo*)(node->val);
+            if(ptask->runflag == TASK_FLAG_IDLE){
+                LOG("checkDeadThread:remove one Dead thread")
+                list_remove(ptasklist, node);
+                FREE_MEM(ptask->prunurl)
+                pthread_mutex_destroy(&ptask->sendMsgMutex);
+                free(ptask);
+                found = 1;
+                break;
+            }
         }
-    }
-    list_iterator_destroy(it);	
-	pthread_mutex_unlock(&taskListMutex);
+        list_iterator_destroy(it);    
+    }while(found == 1);
+    pthread_mutex_unlock(&taskListMutex);
 }
 
 
 char* runShellCommand(char* cmdline){
     FILE* fp = NULL;
     char* presp = NULL;
-    char readbuf[256];
-    int maxlen = 10240;
+    int maxlen = 102400;
     int curlen = 0;
     int status = 0;
     LOG("runShellCommand")
@@ -159,10 +165,13 @@ char* runShellCommand(char* cmdline){
     presp = (char*)malloc(maxlen);
     memset(presp, 0x00, maxlen);
     while(!feof(fp)){
-        memset(readbuf, 0x00, sizeof(readbuf));
-        fgets(readbuf, sizeof(readbuf), fp);
-        LOG(readbuf)
-        strcat(presp, readbuf);
+        if(fgets(presp +curlen, maxlen - curlen, fp) ==  NULL){
+            perror("runShellCommand[read error]:");
+            break;
+        }
+        #ifdef PACKET_DUMP
+        LOG(presp)
+        #endif
         curlen = strlen(presp);
     }
     waitpid(-1, &status, 0);
@@ -258,12 +267,21 @@ int normalClientState(char* inmsg, int inmsglen,
         recievedString[ dataSize ] = 0;
         
         fprintf(stdout, "RECV:%s\n", recievedString);
-        char* presp = runScript(appoption.pcgiscript, recievedString);
-        if(presp != NULL){
-            fprintf(stdout, "SCRIPT RESP:%s\n", presp);
-            wsMakeFrame(presp, strlen(presp), outmsg, (size_t*)outmsglen, WS_TEXT_FRAME);
-            //wsMakeFrame(recievedString, dataSize, gBuffer, &frameSize, WS_TEXT_FRAME);
-            free(presp);
+        if(appoption.pcgiscript == NULL){
+            fprintf(stdout, "SCRIPT NULL\n");
+            *outmsglen = 0;
+        }else{
+            char* presp = runScript(appoption.pcgiscript, recievedString);
+            if(presp != NULL){
+                #ifdef PACKET_DUMP
+                fprintf(stdout, "SCRIPT RESP:%s\n", presp);
+                #endif 
+                wsMakeFrame(presp, strlen(presp), outmsg, (size_t*)outmsglen, WS_TEXT_FRAME);
+                //wsMakeFrame(recievedString, dataSize, gBuffer, &frameSize, WS_TEXT_FRAME);
+                free(presp);
+            }else{
+                *outmsglen = 0;
+            }
         }
         free(recievedString);
         return 0;
@@ -389,11 +407,12 @@ void clientWorker(ClientTaskInfo* pinfo){
             
             usedbytes += completemsglen;
             if(outmsglen > 0){
-				int ret = EXIT_FAILURE;
+                int ret = EXIT_FAILURE;
 
-				pthread_mutex_lock(&pinfo->sendMsgMutex);
-				ret = safeSend(clientSocket, poutmsg, outmsglen);
-				pthread_mutex_unlock(&pinfo->sendMsgMutex);
+                pthread_mutex_lock(&pinfo->sendMsgMutex);
+                fprintf(stdout, "[clientWorker]send data out\n");
+                ret = safeSend(clientSocket, poutmsg, outmsglen);
+                pthread_mutex_unlock(&pinfo->sendMsgMutex);
                 if (ret == EXIT_FAILURE){
                     fprintf(stdout, "[clientWorker]safeSend error\n");      
                     ret = -1;                  
@@ -421,62 +440,67 @@ void broadcastMsg(char *msg, int size)
     ClientTaskInfo* ptask = NULL;
     list_node_t *node;
     list_iterator_t *it;
-	char *pmsgbuf = (char *)malloc(BUF_LEN);
-	size_t frameSize = BUF_LEN;
-	wsMakeFrame(msg, size, pmsgbuf, &frameSize, WS_TEXT_FRAME);
-	LOG("run broadcaseMsg")
+    char *pmsgbuf = (char *)malloc(BUF_LEN);
+    size_t frameSize = BUF_LEN;
+    wsMakeFrame(msg, size, pmsgbuf, &frameSize, WS_TEXT_FRAME);
+    LOG("run broadcastMsg")
 
-	pthread_mutex_lock(&taskListMutex);
-	it = list_iterator_new(ptasklist, LIST_HEAD);
+    pthread_mutex_lock(&taskListMutex);
+    it = list_iterator_new(ptasklist, LIST_HEAD);
     while ((node = list_iterator_next(it))) {
         ptask = (ClientTaskInfo*)(node->val);
         if ((ptask->runflag == TASK_FLAG_RUNNING) && (ptask->state == WS_STATE_NORMAL)) {
             LOG("send msg to client");
-			pthread_mutex_lock(&ptask->sendMsgMutex);
-			safeSend(ptask->sockfd, pmsgbuf, frameSize);
-			pthread_mutex_unlock(&ptask->sendMsgMutex);
+            pthread_mutex_lock(&ptask->sendMsgMutex);
+            safeSend(ptask->sockfd, pmsgbuf, frameSize);
+            pthread_mutex_unlock(&ptask->sendMsgMutex);
 
         }
     }
     list_iterator_destroy(it);
-	pthread_mutex_unlock(&taskListMutex);
-	if (pmsgbuf)
-		free(pmsgbuf);
+    pthread_mutex_unlock(&taskListMutex);
+    if (pmsgbuf)
+        free(pmsgbuf);
 }
 
-const char *fifoName = "/tmp/webSocketFifo";
-
-void *readWebSockThreadFunc(void* param)
+void *readPipeThreadFunc(void* param)
 {
-	#define PIPEBUFFERSIZE 1024
-	int pipeFd = -1;
-	char buffer[PIPEBUFFERSIZE + 1] = {0};
-	printf("readWebSockThreadFunc\n");
+    #define PIPEBUFFERSIZE 1024
+    char* fifoName = NULL;
+    int pipeFd = -1;
+    char buffer[PIPEBUFFERSIZE + 1] = {0};
+    printf("readPipeThreadFunc\n");
     pthread_detach(pthread_self());
-	if (access(fifoName, F_OK) == -1) {
-		int res;
-		res = mkfifo(fifoName, 0777);
-		if (res != 0) {
-			//mkfifo error
-		}
-	}
-	int byteRead = 0;
-	do {
-		pipeFd = open(fifoName, O_RDONLY);
-		if (pipeFd != -1) {
-			byteRead = read(pipeFd, buffer, PIPEBUFFERSIZE);
-			printf("reading %d: %s\n", byteRead, buffer);
-			broadcastMsg(buffer, byteRead);
-			close(pipeFd);
-		}
-	}while (1);
-    printf("readWebSockThreadFunc exit\n");
+    if(param == NULL)
+        COPYSTR(fifoName, "/tmp/webSocketFifo")
+    else
+        COPYSTR(fifoName, param)
+    if (access(fifoName, F_OK) == -1) {
+        int res;
+        res = mkfifo(fifoName, 0777);
+        if (res != 0) {
+            //mkfifo error
+        }
+    }
+    int byteRead = 0;
+    do {
+        pipeFd = open(fifoName, O_RDONLY);
+        if (pipeFd != -1) {
+            byteRead = read(pipeFd, buffer, PIPEBUFFERSIZE);
+            printf("reading %d: %s\n", byteRead, buffer);
+            broadcastMsg(buffer, byteRead);
+            close(pipeFd);
+        }
+    }while (1);
+    FREE_MEM(fifoName)
+    printf("readPipeThreadFunc exit\n");
 }
 
 void printUsage(char* appname){
-    fprintf(stdout, "Usage:\n\t%s -p port -a authcommand -r runcommand", appname);
+    fprintf(stdout, "Usage:\n\t%s -p port -a authcommand -r runcommand -c messagepipe", appname);
     fprintf(stdout, "\n\tauthcommand, the script accept 2 params, first is user, second is passwd, output true/false");
     fprintf(stdout, "\n\truncommand, the script accept 1 param, json format command. output response");
+    fprintf(stdout, "\n\tcommandpipe, the named pipe that recv text message, which will be  broadcasted to all connected clients  ");
     fprintf(stdout, "\n");
 }
 
@@ -484,7 +508,7 @@ int readOption(int argc, char** argv){
     int ret = 0;
     int ch;
     memset(&appoption, 0x00, sizeof(appoption));
-    while((ch = getopt(argc, argv, "p:a:r:h")) != -1){
+    while((ch = getopt(argc, argv, "p:a:r:c:h")) != -1){
         switch(ch){
         case 'p':
             appoption.listenport = atoi(optarg);
@@ -495,6 +519,9 @@ int readOption(int argc, char** argv){
         case 'r':
             COPYSTR(appoption.pcgiscript, optarg)
             break;
+        case 'c':
+            COPYSTR(appoption.pfifoname, optarg)
+            break;            
         case 'h':
             printUsage(argv[0]);
             break;
@@ -539,10 +566,10 @@ int main(int argc, char** argv)
     printf("opened %s:%d\n", inet_ntoa(local.sin_addr), ntohs(local.sin_port));
     
     ptasklist = list_new();
-	pthread_mutex_init(&taskListMutex,NULL);
+    pthread_mutex_init(&taskListMutex,NULL);
 
-	pthread_t broadcaseThreadHandle;
-    pthread_create(&broadcaseThreadHandle, NULL, readWebSockThreadFunc, NULL);
+    pthread_t broadcaseThreadHandle;
+    pthread_create(&broadcaseThreadHandle, NULL, readPipeThreadFunc, NULL);
     
     while (TRUE) {
         struct sockaddr_in remote;
