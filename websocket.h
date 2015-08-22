@@ -71,6 +71,10 @@ static const char versionField[] PROGMEM = "Sec-WebSocket-Version: ";
 static const char version[] PROGMEM = "13";
 static const char secret[] PROGMEM = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+static const char device_id[] PROGMEM = "device_id: ";
+static const char user[] PROGMEM = "user: ";
+static const char password[] PROGMEM = "password: ";
+
 enum wsFrameType { // errors starting from 0xF0
     WS_EMPTY_FRAME = 0xF0,
     WS_ERROR_FRAME = 0xF1,
@@ -94,6 +98,11 @@ struct handshake {
     char *origin;
     char *key;
     char *resource;
+	char *deviceId;
+	char *userName;
+	char *passwd;
+	char *checkUserResult;
+
     enum wsFrameType frameType;
 };
 
@@ -111,7 +120,7 @@ struct handshake {
      * @param outFrame Pointer to frame buffer
      * @param outLength Length of frame buffer. Return length of out frame
      */
-    void wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame,
+    int wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame,
                               size_t *outLength);
 
     /**
