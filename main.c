@@ -74,7 +74,7 @@ void error(const char *msg)
 
 #define LOG(str) \
     printf("%s:%d:%s\n",__FUNCTION__, __LINE__, str);
-    
+
 #define COPYSTR(dest, src) \
     {\
         if(dest != NULL) free(dest); \
@@ -84,7 +84,7 @@ void error(const char *msg)
     
 #define FREE_MEM(ptr) \
     {if(ptr) {free(ptr); ptr=NULL;}}    
-    
+
 void LOG_HEX(char* pbuf, int len)
 {
     int i = 0;
@@ -159,22 +159,19 @@ char* runShellCommand(char* cmdline){
     int status = 0;
     LOG("runShellCommand")
     LOG(cmdline)
-    fp = popen(cmdline, "re");
+    fp = popen(cmdline, "r");
     if(!fp)
         return NULL;
     presp = (char*)malloc(maxlen);
     memset(presp, 0x00, maxlen);
-    while(!feof(fp)){
-        if(fgets(presp +curlen, maxlen - curlen, fp) ==  NULL){
-            perror("runShellCommand[read error]:");
-            break;
-        }
-        #ifdef PACKET_DUMP
-        LOG(presp)
-        #endif
-        curlen = strlen(presp);
-    }
-    waitpid(-1, &status, 0);
+
+	while (fgets(presp +curlen, maxlen - curlen, fp) != NULL) {
+		curlen = strlen(presp);
+		printf("read %d length:%s\n", curlen, presp);
+	}
+	presp[curlen - 1] = 0; //remove last \n
+ 
+	waitpid(-1, &status, 0);
     pclose(fp);
     return presp;    
 }
@@ -187,7 +184,7 @@ char* runScript(char* pscript, char* param){
     
     if(pscript != NULL){
         memset(cmdbuf, 0x00, sizeof(cmdbuf));
-        sprintf(cmdbuf, "%s \'%s\'", pscript, param);
+        sprintf(cmdbuf, "%s %s", pscript, param);
         LOG(cmdbuf)
         return runShellCommand(cmdbuf);
     }
@@ -217,7 +214,30 @@ int safeSend(int clientSocket, const uint8_t *buffer, size_t bufferSize)
     return EXIT_SUCCESS;
 }
 
-
+int checkUserPasswd(char *deviceId, char *userName, char* passwd, char **outCheckResult)
+{
+	char *param = NULL;
+	extern RunOption appoption;
+	int len = 0;
+	if (deviceId && userName && passwd) {
+		len = strlen(deviceId) + strlen(userName) + strlen(passwd) + 5;
+		param = (char*)malloc(len);
+		assert(param != NULL);
+		memset(param, 0, len);
+		sprintf(param, "%s %s %s", deviceId, userName, passwd);
+		*outCheckResult = runScript(appoption.pauthscript,param);
+		if ((*outCheckResult) != NULL) {
+			if (memcmp_P(*outCheckResult, "101", strlen("101")) == 0) {
+				return 0;
+			} else {
+				return -1;
+			}
+		}
+	} else {
+		return -1;
+	}
+	return -1;
+}
 
 int openingClientState(char* inmsg, int inmsglen,
         char* outmsg, int* outmsglen, enum wsState * state, char** purl){
@@ -227,12 +247,13 @@ int openingClientState(char* inmsg, int inmsglen,
     
     frameType = wsParseHandshake(inmsg, inmsglen, &hs);
     if(frameType == WS_OPENING_FRAME){
+		int ret = -1;
         fprintf(stdout, "[openingClientState hs.resource]:%s\n", hs.resource);
-        COPYSTR((*purl), hs.resource)
-        wsGetHandshakeAnswer(&hs, outmsg, (size_t*)outmsglen);
+		COPYSTR((*purl), hs.resource)
+        ret = wsGetHandshakeAnswer(&hs, outmsg, (size_t*)outmsglen);
         freeHandshake(&hs);
-        *state = WS_STATE_NORMAL;
-        return 0;
+        *state = (ret == 0) ? WS_STATE_NORMAL : WS_STATE_OPENING;
+        return ret;
     }
     
     assert(frameType != WS_INCOMPLETE_FRAME);

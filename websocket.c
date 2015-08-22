@@ -31,6 +31,10 @@ void nullHandshake(struct handshake *hs)
     hs->origin = NULL;
     hs->resource = NULL;
     hs->key = NULL;
+	hs->deviceId = NULL;
+	hs->userName = NULL;
+	hs->passwd = NULL;
+	hs->checkUserResult = NULL;
     hs->frameType = WS_EMPTY_FRAME;
 }
 
@@ -47,6 +51,18 @@ void freeHandshake(struct handshake *hs)
     }
     if (hs->key) {
         free(hs->key);
+    }
+    if (hs->userName) {
+        free(hs->userName);
+    }
+    if (hs->passwd) {
+        free(hs->passwd);
+    }
+    if (hs->deviceId) {
+        free(hs->deviceId);
+    }
+    if (hs->checkUserResult) {
+        free(hs->checkUserResult);
     }
     nullHandshake(hs);
 }
@@ -151,8 +167,19 @@ enum wsFrameType wsParseHandshake(const uint8_t *inputFrame, size_t inputLength,
             if (memcmp_P(compare, websocket, strlen_P(websocket)) == 0)
                 upgradeFlag = TRUE;
             free(compare);
-        };
-
+        } else
+        if (memcmp_P(inputPtr, device_id, strlen_P(device_id)) == 0) {
+            inputPtr += strlen_P(device_id);
+            hs->deviceId = getUptoLinefeed(inputPtr);
+		} else
+        if (memcmp_P(inputPtr, user, strlen_P(user)) == 0) {
+            inputPtr += strlen_P(user);
+            hs->userName = getUptoLinefeed(inputPtr);
+		} else 
+		if (memcmp_P(inputPtr, password, strlen_P(password)) == 0) {
+            inputPtr += strlen_P(password);
+            hs->passwd = getUptoLinefeed(inputPtr);
+		} ;
         inputPtr = strstr_P(inputPtr, rn) + 2;
     }
 
@@ -164,17 +191,18 @@ enum wsFrameType wsParseHandshake(const uint8_t *inputFrame, size_t inputLength,
     } else {
         hs->frameType = WS_OPENING_FRAME;
     }
-    
+
+
     return hs->frameType;
 }
-
-void wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame, 
+int wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame, 
                           size_t *outLength)
 {
+	extern int checkUserPasswd(char *deviceId, char *userName, char* passwd, char **outCheckResult);
     assert(outFrame && *outLength);
     assert(hs->frameType == WS_OPENING_FRAME);
     assert(hs && hs->key);
-
+	int ret = -1;
     char *responseKey = NULL;
     uint8_t length = strlen(hs->key)+strlen_P(secret);
     responseKey = malloc(length);
@@ -185,12 +213,14 @@ void wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame,
     sha1(shaHash, responseKey, length);
     size_t base64Length = base64(responseKey, length, shaHash, 20);
     responseKey[base64Length] = '\0';
-    
+
+	ret = checkUserPasswd(hs->deviceId, hs->userName, hs->passwd, &(hs->checkUserResult));    
     int written = sprintf_P((char *)outFrame,
-                            PSTR("HTTP/1.1 101 Switching Protocols\r\n"
+                            PSTR("HTTP/1.1 %s Switching Protocols\r\n"
                                  "%s%s\r\n"
                                  "%s%s\r\n"
                                  "Sec-WebSocket-Accept: %s\r\n\r\n"),
+                            hs->checkUserResult,
                             upgradeField,
                             websocket,
                             connectionField,
@@ -201,6 +231,7 @@ void wsGetHandshakeAnswer(const struct handshake *hs, uint8_t *outFrame,
     // if assert fail, that means, that we corrupt memory
     assert(written <= *outLength);
     *outLength = written;
+	return ret;
 }
 
 void wsMakeFrame(const uint8_t *data, size_t dataLength,
